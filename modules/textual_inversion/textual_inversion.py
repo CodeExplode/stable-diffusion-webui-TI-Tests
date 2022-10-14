@@ -171,6 +171,26 @@ def create_embedding(name, num_vectors_per_token, init_text='*'):
 
     return fn
 
+def create_embedding(name, num_vectors_per_token, init_text='*'):
+    cond_model = shared.sd_model.cond_stage_model
+    embedding_layer = cond_model.wrapped.transformer.text_model.embeddings
+
+    ids = cond_model.tokenizer(init_text, max_length=num_vectors_per_token+1, return_tensors="pt", padding='max_length',)["input_ids"]
+    ids = torch.narrow(ids, 1, 1, num_vectors_per_token) # ignore the first token, because it is the 49406 start of command?
+    embedded = embedding_layer.token_embedding.wrapped(ids.to(devices.device)).squeeze(0)
+    vec = torch.zeros((num_vectors_per_token, embedded.shape[1]), device=devices.device)
+
+    for i in range(num_vectors_per_token):
+        vec[i] = embedded[i].clone().detach()
+
+    fn = os.path.join(shared.cmd_opts.embeddings_dir, f"{name}.pt")
+    assert not os.path.exists(fn), f"file {fn} already exists"
+
+    embedding = Embedding(vec, name)
+    embedding.step = 0
+    embedding.save(fn)
+
+    return fn
 
 def train_embedding(embedding_name, learn_rate, data_root, log_directory, training_width, training_height, steps, create_image_every, save_embedding_every, template_file, save_image_with_stored_embedding, preview_image_prompt):
     assert embedding_name, 'embedding not selected'
@@ -212,6 +232,8 @@ def train_embedding(embedding_name, learn_rate, data_root, log_directory, traini
     embedding.vec.requires_grad = True
 
     losses = torch.zeros((32,))
+    
+    distribution_floor, distribution_ceiling = determine_embedding_distribution()
 
     last_saved_file = "<none>"
     last_saved_image = "<none>"
@@ -240,6 +262,13 @@ def train_embedding(embedding_name, learn_rate, data_root, log_directory, traini
             x = entry.latent.to(devices.device)
             loss = shared.sd_model(x.unsqueeze(0), c)[0]
             del x
+            
+            emb_normalized = embedding.vec.clip(distribution_floor, distribution_ceiling)
+            diff = (emb_normalized - embedding.vec).mean().abs()
+            reg_loss = diff * 0.0001 # or some other small number
+            #reg_loss = diff * 1000 # reg loss is so small that maybe this scale is better
+            
+            loss += reg_loss
 
             losses[embedding.step % losses.shape[0]] = loss.item()
 
@@ -250,7 +279,7 @@ def train_embedding(embedding_name, learn_rate, data_root, log_directory, traini
         epoch_num = embedding.step // len(ds)
         epoch_step = embedding.step - (epoch_num * len(ds)) + 1
 
-        pbar.set_description(f"[Epoch {epoch_num}: {epoch_step}/{len(ds)}]loss: {losses.mean():.7f}")
+        pbar.set_description(f"[Epoch {epoch_num}: {epoch_step}/{len(ds)}]loss: {losses.mean():.7f}, reg_loss: {reg_loss}")
 
         if embedding.step > 0 and embedding_dir is not None and embedding.step % save_embedding_every == 0:
             last_saved_file = os.path.join(embedding_dir, f'{embedding_name}-{embedding.step}.pt')
