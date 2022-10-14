@@ -171,26 +171,27 @@ def create_embedding(name, num_vectors_per_token, init_text='*'):
 
     return fn
 
-def create_embedding(name, num_vectors_per_token, init_text='*'):
+def determine_embedding_distribution():
     cond_model = shared.sd_model.cond_stage_model
     embedding_layer = cond_model.wrapped.transformer.text_model.embeddings
-
-    ids = cond_model.tokenizer(init_text, max_length=num_vectors_per_token+1, return_tensors="pt", padding='max_length',)["input_ids"]
-    ids = torch.narrow(ids, 1, 1, num_vectors_per_token) # ignore the first token, because it is the 49406 start of command?
-    embedded = embedding_layer.token_embedding.wrapped(ids.to(devices.device)).squeeze(0)
-    vec = torch.zeros((num_vectors_per_token, embedded.shape[1]), device=devices.device)
-
-    for i in range(num_vectors_per_token):
-        vec[i] = embedded[i].clone().detach()
-
-    fn = os.path.join(shared.cmd_opts.embeddings_dir, f"{name}.pt")
-    assert not os.path.exists(fn), f"file {fn} already exists"
-
-    embedding = Embedding(vec, name)
-    embedding.step = 0
-    embedding.save(fn)
-
-    return fn
+    
+    distribution_floor = torch.zeros(768)
+    distribution_ceiling = torch.zeros(768)
+    
+    for i in range(49405): # guessing that's the range of CLIP tokens given that 49406 and 49407 are special tokens presumably appended to the end
+        embedding = embedding_layer.token_embedding.wrapped(torch.LongTensor([i]).to(devices.device)).squeeze(0)
+        if i == 0:
+            distribution_floor = embedding
+            distribution_ceiling = embedding
+        else:
+            distribution_floor = torch.minimum(distribution_floor, embedding)
+            distribution_ceiling = torch.maximum(distribution_ceiling, embedding)
+    
+    #torch.set_printoptions(sci_mode=False, threshold=77*768, linewidth=77*768*13)
+    #print(f'Embedding minimum weights: {distribution_floor}')
+    #print(f'Embedding maximum weights: {distribution_ceiling}')
+    
+    return distribution_floor, distribution_ceiling
 
 def train_embedding(embedding_name, learn_rate, data_root, log_directory, training_width, training_height, steps, create_image_every, save_embedding_every, template_file, save_image_with_stored_embedding, preview_image_prompt):
     assert embedding_name, 'embedding not selected'
