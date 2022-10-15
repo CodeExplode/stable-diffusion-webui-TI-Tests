@@ -265,7 +265,7 @@ def train_embedding(embedding_name, learn_rate, data_root, log_directory, traini
             del x
             
             emb_normalized = embedding.vec.clip(distribution_floor, distribution_ceiling)
-            diff = (emb_normalized - embedding.vec).mean().abs()
+            diff = torch.abs(emb_normalized - embedding.vec).mean()
             reg_loss = diff * 0.0001 # or some other small number
             #reg_loss = diff * 1000 # reg loss is so small that maybe this scale is better
             
